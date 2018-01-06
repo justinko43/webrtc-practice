@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="ie=edge">
+  <script src="https://code.jquery.com/jquery-1.10.2.min.js"></script>
+  <title>Document</title>
+</head>
+<body>
+  <h1>This is WEBRTC</h1>
+  <img id="P2Pim"/>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const configuration = {'iceServers': [{'url': 'stun:stun.l.google.com:19302'}]};
+    const socket = io();
+    let my_id;
+    let elementHasBeenDownloaded = false;
+    var isInitiator;
+    // reference to the lone PeerConnection instance on which we build a data channel
+    let peerConnections = {};
+    // array of known peer socket ids in a given room
+    let connections = [];
+    // reference to the data channels
+    let dataChannels = {};
+    let currentDataChannel;
+
+    const loadFromServer = () => {
+      if (isInitiator && !elementHasBeenDownloaded) {
+        $("#P2Pim").attr("src", "./assets/cat.jpg");
+      }
+      elementHasBeenDownloaded = true;
+    }
+
+    socket.on('first', (clientID) => {
+      my_id = clientID;
+      isInitiator = true;
+      console.log(isInitiator);
+      loadFromServer();
+    });
+
+    socket.on('message', (message) => {
+      console.log('Client received message: ', message);
+      signalMessage(message);
+    });
+
+    socket.on('get_peers', (connectArray, you) => {
+      my_id = you;
+      connections = connectArray;
+      // createPeerConnections();
+      console.log(connections);
+    });
+
+    socket.on('new_peer', function(socketId) {
+      // ad the id to the connections list
+      connections.push(socketId);
+      // create a pc
+      createPeerConnection(isInitiator, configuration, socketId);
+    });
+
+    socket.on('create_pc', function(socketId) {
+      createPeerConnection(isInitiator, configuration, socketId);
+    })
+
+    socket.emit('join');
+
+    const sendMessage = (message) => {
+      socket.emit('message', message);
+    }
+
+    let peerConn;
+
+    const signalMessage = (message) => {
+      if (message.type === 'offer') {
+        console.log('Got offer. Sending answer to peer.');
+        // answer the pc offer
+        peerConn.setRemoteDescription(new RTCSessionDescription(message), function(){}, logError);
+        peerConn.createAnswer(onLocalSessionCreated, logError);
+    } else if (message.type === 'answer') {
+        console.log('Got answer.');
+        // set the remote description
+        peerConn.setRemoteDescription(new RTCSessionDescription(message), function(){}, logError);
+    } else if (message.type === 'candidate') {
+        // add an ICE candidate
+        peerConn.addIceCandidate(new RTCIceCandidate({candidate: message.candidate}));
+        console.log(message.candidate);
+    } else if (message === 'bye') {
+        // no need to do anything here, we clean up sockets elsewhere
+        console.log(message);
+    }
+  }
+
+  const createPeerConnection = (isInitiator, config, peer_id) => {
+    isInitiator = isInitiator || false;
+    console.log('initator? ', isInitiator);
+    peerConn = peerConnections[peer_id] = new RTCPeerConnection(config);
+
+    peerConn.onicecandidate = (event) => {
+      if (event.candidate) {
+        sendMessage({
+          type: 'candidate',
+          label: event.candidate.sdpMLineIndex,
+          id: event.candidate.sdpMid,
+          candidate: event.candidate.candidate
+        });
+      } else {
+        console.log('END OF CANDIDATES.');
+      }
+    }
+
+    if (isInitiator) {
+      console.log("My id is ", my_id, " and I am creating a DataChannel with ", peer_id);
+      console.log(dataChannels);
+      // creates a data channel on top of the necessary peer connection
+      dataChannels[peer_id] = peerConn.createDataChannel("photos " + my_id, {reliable: false});
+      onDataChannelCreated(dataChannels[peer_id], peer_id);
+      console.log('Creating an offer');
+      peerConn.createOffer(onLocalSessionCreated, logError);
+    } else {
+        peerConn.ondatachannel = function (event) {
+        // else, a data channel is being set up with us
+        dataChannels[peer_id] = event.channel;
+        onDataChannelCreated(dataChannels[peer_id], peer_id);
+      };
+    }
+  }
+
+  const onLocalSessionCreated = (desc) => {
+    console.log('local session created:', desc);
+    peerConn.setLocalDescription(desc, () => {
+        console.log('sending local desc:', peerConn.localDescription);
+        sendMessage(peerConn.localDescription);
+    });
+  }
+
+  const onDataChannelCreated = (channel, id) => {
+    let being = isInitiator ? "am" : "am not";
+    console.log("My id is", my_id, "I", being, " an initiator, and I CREATED a DataChannel with", id);
+    channel.onopen = () => {
+      console.log('We just opened this channel!');
+      if (isInitiator) {
+        console.log('Initiator is attempting to send photo');
+        sendPhoto();
+      } else {
+        //attempt to receive bits
+      }
+    }
+    channel.onclose = () => {
+        delete dataChannels[id];
+        delete peerConnections[id];
+        delete connections[id];
+        console.info("dataChannel killed on client!");
+    };
+    channel.onmessage = receiveDataChromeFactory(id);
+  }
+
+  const receiveDataChromeFactory = (id) => {
+    let buf, count;
+
+    return onmessage = (event) => {
+    if (typeof event.data === 'string') {
+        buf = window.buf = new Uint8ClampedArray(parseInt(event.data));
+        count = 0;
+        console.log('Expecting a total of ' + buf.byteLength + ' bytes');
+        return;
+      }
+    }
+
+    let data = new Uint8ClampedArray(event.data);
+    buf.set(data, count);
+    count += data.byteLength;
+    console.log('count: ', count);
+    if (count == buf.byteLength) {
+      console.log('Finished rendering photo');
+      // socket.emit("bytes_received");
+      console.log(buf);
+    }
+  }
+
+  function sendPhoto() {
+    var dcid = connections[Math.floor(Math.random()*connections.length)];
+    var dataChannel = dataChannels[Object.keys(dataChannels)[0]];
+    console.info("I have chosen dataChannel ", dataChannel, " with id ", dcid);
+
+    console.error(dcid);
+    currentDataChannel = dcid;
+
+    // Split data channel message in chunks of this byte length.
+    var CHUNK_LEN = 64000;
+
+    var canvas = document.createElement('canvas');
+    var context = canvas.getContext('2d');
+    var img = document.getElementById('P2Pim');
+    context.drawImage(img, 0, 0);
+    var myData = context.getImageData(0, 0, img.width, img.height);
+
+    // canvasWidth = 300;
+    // canvasHeight = 150;
+    // var img = canvas.getImageData(0, 0, canvasWidth, canvasHeight),
+    //     len = img.data.byteLength,
+    //     n = len / CHUNK_LEN | 0;
+    var len = myData.data.byteLength,
+    n = len / CHUNK_LEN | 0;
+
+    console.log('Sending a total of ' + len + ' byte(s)');
+    dataChannel.send(len);
+
+    // split the photo and send in chunks of about 64KB
+    for (var i = 0; i < n; i++) {
+        var start = i * CHUNK_LEN,
+            end = (i+1) * CHUNK_LEN;
+        console.log(start + ' - ' + (end-1));
+        dataChannel.send(myData.data.subarray(start, end));
+    }
+
+    // send the reminder, if any
+    if (len % CHUNK_LEN) {
+        console.log('last ' + len % CHUNK_LEN + ' byte(s)');
+        dataChannel.send(myData.data.subarray(n * CHUNK_LEN));
+    }
+    // dataChannel.close();
+    // delete dataChannels[dcid];
+    console.error(dataChannels, dataChannel);
+}
+
+
+// converts a canvas element to an image
+function convertCanvasToImage(canvas) {
+    var image = new Image();
+    image.src = canvas.toDataURL();
+    return image;
+}
+
+// renders a photo on screen by writing the data to
+// a canvas element and turning it into an img
+function renderPhoto(data) {
+    // create the canvas elt
+    var photoElt = document.createElement('canvas');
+    photoElt.classList.add('photo');
+    var ctx = photoElt.getContext('2d');
+    ctx.canvas.width  = 300;
+    ctx.canvas.height = 150;
+    img = ctx.createImageData(300, 150);
+
+    // set the image data
+    img.data.set(data);
+    ctx.putImageData(img, 0, 0);
+
+    // write the new src into the DOM
+    $("#P2Pim").attr("src", convertCanvasToImage(photoElt).src);
+    isInitiator = true;
+
+    // let the server know about the successfull transfer
+    socket.emit('downloaded');
+
+    // close the data channel and pc
+    dataChannels[Object.keys(dataChannels)[0]].close();
+    delete dataChannels[Object.keys(dataChannels)[0]];
+    peerConn.close();
+  }
+  function logError(err) {
+    console.log(err.toString(), err);
+  }
+
+  </script>
+</body>
+</html>
